@@ -1,17 +1,23 @@
 all: build
 
-PREFIX?=staging-k8s.gcr.io
+#Environment Prerequisite
+#GOLANG_VERSION like 1.8, 1.12.7, etc.
+#VERSION like v1.6.0-beta.1, etc.
+#SUPPORTED_KUBE_VERSIONS like 1.9.3, etc.
+#ARCH like amd64, etc.
+#HEAPSTER_BUILD_DIR like /<some directory path>
+#REPO_PREFIX like k8s.gcr.io, etc.
+#DOCKERHUB_USER and DOCKERHUB_PWD should be defined previously.
+
 FLAGS=
-ARCH?=amd64
 ALL_ARCHITECTURES=amd64 arm arm64 ppc64le s390x
 ML_PLATFORMS=linux/amd64,linux/arm,linux/arm64,linux/ppc64le,linux/s390x
-GOLANG_VERSION?=1.8
+#GOLANG_VERSION?=1.8
 
 ifndef TEMP_DIR
 TEMP_DIR:=$(shell mktemp -d /tmp/heapster.XXXXXX)
 endif
 
-VERSION?=v1.6.0-beta.1
 GIT_COMMIT:=$(shell git rev-parse --short HEAD)
 
 TESTUSER=
@@ -34,7 +40,6 @@ ifeq ($(INTERACTIVE), 1)
 	TTY=-t
 endif
 
-SUPPORTED_KUBE_VERSIONS=1.9.3
 TEST_NAMESPACE=heapster-e2e-tests
 
 HEAPSTER_LDFLAGS=-w -X k8s.io/heapster/version.HeapsterVersion=$(VERSION) -X k8s.io/heapster/version.GitCommit=$(GIT_COMMIT)
@@ -43,8 +48,8 @@ fmt:
 	find . -type f -name "*.go" | grep -v "./vendor*" | xargs gofmt -s -w
 
 build: clean fmt
-	GOARCH=$(ARCH) CGO_ENABLED=0 go build -ldflags "$(HEAPSTER_LDFLAGS)" -o heapster k8s.io/heapster/metrics
-	GOARCH=$(ARCH) CGO_ENABLED=0 go build -ldflags "$(HEAPSTER_LDFLAGS)" -o eventer k8s.io/heapster/events
+	GOARCH=$(ARCH) CGO_ENABLED=0 go build -ldflags "$(HEAPSTER_LDFLAGS)" -o $(HEAPSTER_BUILD_DIR)/heapster k8s.io/heapster/metrics
+	GOARCH=$(ARCH) CGO_ENABLED=0 go build -ldflags "$(HEAPSTER_LDFLAGS)" -o $(HEAPSTER_BUILD_DIR)/eventer k8s.io/heapster/events
 
 sanitize:
 	hooks/check_boilerplate.sh
@@ -72,10 +77,11 @@ container:
 		&& GOARCH=$(ARCH) CGO_ENABLED=0 go build -ldflags \"$(HEAPSTER_LDFLAGS)\" -o /build/heapster k8s.io/heapster/metrics \
 		&& GOARCH=$(ARCH) CGO_ENABLED=0 go build -ldflags \"$(HEAPSTER_LDFLAGS)\" -o /build/eventer k8s.io/heapster/events"
 
-	cp deploy/docker/Dockerfile $(TEMP_DIR)
-	docker build --pull -t $(PREFIX)/heapster-$(ARCH):$(VERSION) $(TEMP_DIR)
+build-image:
+	cp $(REPO_DIR)/deploy/docker/Dockerfile $(HEAPSTER_BUILD_DIR)/Dockerfile
+	docker build --pull -t $(REPO_PREFIX)/heapster-$(ARCH):$(VERSION) $(HEAPSTER_BUILD_DIR)
 ifneq ($(OVERRIDE_IMAGE_NAME),)
-	docker tag $(PREFIX)/heapster-$(ARCH):$(VERSION) $(OVERRIDE_IMAGE_NAME)
+	docker tag $(REPO_PREFIX)/heapster-$(ARCH):$(VERSION) $(OVERRIDE_IMAGE_NAME)
 endif
 
 ifndef DOCKER_IN_DOCKER
@@ -83,39 +89,43 @@ ifndef DOCKER_IN_DOCKER
 endif
 
 do-push:
-	docker push $(PREFIX)/heapster-$(ARCH):$(VERSION)
+	docker push $(REPO_PREFIX)/heapster-$(ARCH):$(VERSION)
 ifeq ($(ARCH),amd64)
 # TODO: Remove this and push the manifest list as soon as it's working
-	docker tag $(PREFIX)/heapster-$(ARCH):$(VERSION) $(PREFIX)/heapster:$(VERSION)
-	docker push $(PREFIX)/heapster:$(VERSION)
+	docker tag $(REPO_PREFIX)/heapster-$(ARCH):$(VERSION) $(REPO_PREFIX)/heapster:$(VERSION)
+	docker push $(REPO_PREFIX)/heapster:$(VERSION)
 endif
 
 # Should depend on target: ./manifest-tool
-push: gcr-login $(addprefix sub-push-,$(ALL_ARCHITECTURES))
-#	./manifest-tool push from-args --platforms $(ML_PLATFORMS) --template $(PREFIX)/heapster-ARCH:$(VERSION) --target $(PREFIX)/heapster:$(VERSION)
+push: docker-login $(addprefix sub-push-,$(ALL_ARCHITECTURES))
+#	./manifest-tool push from-args --platforms $(ML_PLATFORMS) --template $(REPO_PREFIX)/heapster-ARCH:$(VERSION) --target $(REPO_PREFIX)/heapster:$(VERSION)
 
 sub-push-%:
-	$(MAKE) ARCH=$* PREFIX=$(PREFIX) VERSION=$(VERSION) container
-	$(MAKE) ARCH=$* PREFIX=$(PREFIX) VERSION=$(VERSION) do-push
+	$(MAKE) ARCH=$* REPO_PREFIX=$(REPO_PREFIX) VERSION=$(VERSION) container
+	$(MAKE) ARCH=$* REPO_PREFIX=$(REPO_PREFIX) VERSION=$(VERSION) build-image
+	$(MAKE) ARCH=$* REPO_PREFIX=$(REPO_PREFIX) VERSION=$(VERSION) do-push
 
 influxdb:
-	ARCH=$(ARCH) PREFIX=$(PREFIX) make -C influxdb build
+	ARCH=$(ARCH) REPO_PREFIX=$(REPO_PREFIX) make -C influxdb build
 
 grafana:
-	ARCH=$(ARCH) PREFIX=$(PREFIX) make -C grafana build
+	ARCH=$(ARCH) REPO_PREFIX=$(REPO_PREFIX) make -C grafana build
 
 push-influxdb:
-	PREFIX=$(PREFIX) make -C influxdb push
+	REPO_PREFIX=$(REPO_PREFIX) make -C influxdb push
 
 push-grafana:
-	PREFIX=$(PREFIX) make -C grafana push
+	REPO_PREFIX=$(REPO_PREFIX) make -C grafana push
 
-gcr-login:
-ifeq ($(findstring gcr.io,$(PREFIX)),gcr.io)
-	@echo "If you are pushing to a gcr.io registry, you have to be logged in via 'docker login'; 'gcloud docker push' can't push manifest lists yet."
-	@echo "This script is automatically logging you in now with 'gcloud docker -a'"
-	gcloud docker -a
-endif
+#gcr-login:
+#ifeq ($(findstring gcr.io,$(REPO_PREFIX)),gcr.io)
+#	@echo "If you are pushing to a gcr.io registry, you have to be logged in via 'docker login'; 'gcloud docker push' can't push manifest lists yet."
+#	@echo "This script is automatically logging you in now with 'gcloud docker -a'"
+#	gcloud docker -a
+#endif
+docker-login:
+	@echo "Docker login with user $(DOCKERHUB_USER) credential."
+	@echo $(DOCKERHUB_PWD) | docker login --username=$(DOCKERHUB_USER) --password-stdin
 
 # TODO(luxas): As soon as it's working to push fat manifests to gcr.io, reenable this code
 #./manifest-tool:
